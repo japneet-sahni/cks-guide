@@ -192,7 +192,7 @@ openssl x509 -in admin.crt -text -noout
 - Add service account to pod specification (serviceAccountName: abc)
 - Default token is mounted on /var/run/secrets/kubernetes.io/serviceaccount/token
 
-### 1.2.3 Certificates API
+## 1.3 Certificates API
 - All certificate related operations are handled by controller manager
     - CSR-APPROVING
     - CSR-SIGNING
@@ -219,7 +219,7 @@ EOF
 # Send this to japneet (new admin user)
 ```
 
-### 1.2.4 Authorization
+## 1.4 Authorization
 1) Node
 - In order to be authorized by the Node authorizer, kubelets must use a credential that identifies them as being in the system:nodes group, with a username of system:node:<nodeName>. This group and user name format match the identity created for each kubelet as part of kubelet TLS bootstrapping. The value of <nodeName> must match precisely the name of the node as registered by the kubelet. By default, this is the host name as provided by hostname, or overridden via the kubelet option --hostname-override
 2) ABAC (Attribute-based)
@@ -238,7 +238,7 @@ EOF
 - The authorization mode is set in kube-apiserver.yaml
     - --authorization-mode=Node,RBAC,Webhook (If node denies, it goes to RBAC, if RBAC denies, it goes to webhook)
 
-### 1.2.5 RBAC
+## 1.5 RBAC
 ```sh
 # Role
 cat <<EOF | kubectl apply -f -
@@ -272,4 +272,256 @@ EOF
 
 # kubectl api-resources --namespaced=true
 # kubectl api-resources --namespaced=false (cluster scoped resources)
+```
+## 1.6 Kubelet Security
+
+```sh
+# To know where is kubelet configuration stored | (ps -ef | grep kubelet)
+/usr/bin/kubelet --bootstrap-kubeconfig=/etc/kubernetes/bootstrap-kubelet.conf --kubeconfig=/etc/kubernetes/kubelet.conf --config=/var/lib/kubelet/config.yaml --network-plugin=cni --pod-infra-container-image=k8s.gcr.io/pause:3.2
+```
+- Port 10250 : Serves API that allow full access (anonymous requests) Eg: curl -sk https://localhost:10250/pods/
+- Port 10255 : Serves API that allows unauthenticated read-only access. Eg : curl -sk http://localhost:10255/metrics
+
+#### Disable anonymous authentication in 2 ways
+  - By deafult, allows anonymous access on port 10250
+  - Add --anonymous-auth=false in kubelet.service
+  - Add authentication.anonymous.enabled: false in kubelet-config.yaml
+```sh
+# curl -sk https://localhost:10250/pods/
+Unauthorized
+```
+
+#### Enabling Authentication using certificates.
+- API server acts as a client when connecting to Kubelet which behaves as a server now.
+  - In kube-apiserver-config.yml
+    - set --kubelet-client-certificate=path/to/kubelet.crt
+    - set --kubelet-client-key=path/to/kubelet.key
+  - In kubelet-config.yaml
+    - Add authentication.x509.clientCAFile: /path/to/ca.crt
+
+#### Enabling authorization in kubelet
+- Default authorization mode is alwaysAllow
+- Add authorization.mode: Webhook in kubelet-config.yaml (goes to API server to see if the user is able to access kubelet)
+```sh
+# IF authentication is enabled and authorization mode is set to Webhook (W caps)
+# curl -sk https://localhost:10250/pods/
+Forbidden (user=system:anonymous, verb=get, resource=nodes, subresource=proxy)
+```
+
+#### Disabling read only port 10255
+- Add readOnlyPort: 0 to disable this service.
+
+```sh
+# Final kubelet configuration file
+
+apiVersion: kubelet.config.k8s.io/v1beta1
+kind: KubeletConfiguration
+authentication:
+  anonymous:
+    enabled: false
+  x509:
+    clientCAFile: /etc/kubernetes/pki/ca.crt
+authorization:
+  mode: Webhook
+readOnlyPort: 0
+```
+
+## 1.7 Kubectl proxy & kubectl port-forward
+- Uses your local kubeconfig file to access api server. Now, you don't need to specify api server in your curl command.
+```sh
+# start kubectl proxy on your local laptop
+kubectl proxy
+Starting to serve on 127.0.0.1:8001
+
+# curl api server through proxy
+curl http://localhost:8001 -k
+
+# access nginx cluster-ip service in default namespace
+curl http://localhost:8001/api/v1/namespaces/default/services/nginx/proxy
+
+# forward your request to local port of your laptop to service port
+kubectl port-forward service nginx 28080:80 (where 28080 is your local port and 80 is service port)
+```
+
+## 1.8 Securing Kubernetes Dashboard
+
+```sh
+kubectl apply -f https://raw.githubusercontent.com/kubernetes/dashboard/v2.3.1/aio/deploy/recommended.yaml
+kubectl proxy &
+http://localhost:8001/api/v1/namespaces/kubernetes-dashboard/services/https:kubernetes-dashboard:/proxy/
+
+# Create SA and give "view" cluster role
+cat <<EOF | kubectl apply -f -
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: readonly-user
+  namespace: kubernetes-dashboard
+EOF
+
+cat <<EOF | kubectl apply -f -
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: readonly-user-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: view
+subjects:
+- kind: ServiceAccount
+  name: readonly-user
+  namespace: kubernetes-dashboard
+EOF
+
+kubectl -n kubernetes-dashboard get secret $(kubectl -n kubernetes-dashboard get sa/readonly-user -o jsonpath="{.secrets[0].name}") -o go-template="{{.data.token | base64decode}}"
+Paste this token on Dashboard
+```
+
+## 1.9 Verifying K8S Platform binaries
+```sh
+https://github.com/kubernetes/kubernetes/releases/tag/v1.20.0
+
+# curl https://github.com/kubernetes/kubernetes/releases/download/v1.20.0/kubernetes.tar.gz -L -o /opt/kubernetes.tar.gz
+
+# sha512sum kubernetes.tar.gz  
+ebfe49552bbda02807034488967b3b62bf9e3e507d56245e298c4c19090387136572c1fca789e772a5e8a19535531d01dcedb61980e42ca7b0461d3864df2c14  kubernetes.tar.gz
+```
+
+## 1.10 Upgrade process
+
+```sh
+# On master
+kubeadm upgrade plan
+apt update
+kubectl drain master --ignore-daemonsets
+apt install kubeadm=1.20.0-00
+kubeadm upgrade apply v1.20.0
+apt install kubelet=1.20.0-00
+systemctl restart kubelet
+kubectl uncordon master
+
+# Before moving to worker
+kubectl drain node01 --ignore-daemonsets --force
+ssh node01
+
+# On worker
+apt install kubeadm=1.20.0-00
+kubeadm upgrade node
+apt install kubelet=1.20.0-00
+systemctl restart kubelet
+exit
+
+kubectl uncordon node01
+```
+
+## 1.11 Network Policies
+```sh
+# A single to/from entry that specifies both namespaceSelector and podSelector selects particular Pods within particular namespaces. 
+# Below example contains two elements in the from array, and allows connections from Pods in the local Namespace with the label role=api, or from any Pod in any namespace with the label project=prod.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: db-policy
+  namespace: prod
+spec:
+  podSelector:
+    matchLabels:
+      role: db
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - ipBlock:
+        cidr: 172.17.0.0/16
+        except:
+        - 172.17.1.0/24
+    - namespaceSelector:
+        matchLabels:
+          project: prod
+    - podSelector:
+        matchLabels:
+          role: api
+    ports:
+    - protocol: TCP
+      port: 3306
+  egress:
+  - to:
+    - ipBlock:
+        cidr: 10.0.0.0/24
+    ports:
+    - protocol: TCP
+      port: 5978
+```
+
+## 1.12 Ingress
+- Ingress Controllers have extra intelligence built into them to monitor the cluster for ingress resources and configure the underlying nginx configuration when something is chnaged. For doing this, it needs a SA with extra privileges.
+- Ingress controller is deployed as a simple deployment. All the configuration is stored in a config map.
+- Example : GCE, Nginx ( supported by K8S ), traefik, istio, contour.
+
+```sh
+# kubectl create ingress ingress-wear-watch \
+--rule="foo.com/wear=wear-service:8080" \
+--rule="foo.com/stream=video-service:8080"
+
+# or 
+
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+  name: ingress-wear-watch
+spec:
+  rules:
+  - host: foo.com
+    http:
+      paths:
+      - backend:
+          service:
+            name: wear-service
+            port:
+              number: 8080
+        path: /wear
+        pathType: Prefix
+      - backend:
+          service:
+            name: video-service
+            port:
+              number: 8080
+        path: /stream
+        pathType: Prefix
+```
+
+## 1.13 Securing the docker daemon
+- If somebody gains access to docker daemon, he/she can delete/read/update/run the existing containers, delete volumes, gain access to host using priveliged container.
+- You can start docker daemon using dockerd command.
+- By default, docker daemon listens on a unix socket, /var/run/docker.sock
+
+### Securing docker daemon
+1) Secure host itself first using SSH authentication.
+
+```sh
+# docker daemon config file : /etc/docker/daemon.json
+# 2375 : unencrypted traffic, 2376 : encrypted traffic
+# Using hosts, anybody can target docker daemon from outside the host (tcp socket). For inside the host, you can access using unix socket.
+
+{
+  "hosts": ["tcp://192.168.1.0:2376"],
+  "tls": true, # this will encrypt traffic but still any docker client can reach server.
+  "tlscert": "/var/docker/server.pem",
+  "tlskey": "/var/docker/server.key",
+  "tlsverify": true, #this is what enables authentication and clients with proper keys will be able to communicate.
+  "tlscacert" "/var/docker/cacert.pem"
+}
+
+On docker client now, set below envt variables
+# export DOCKER_HOST="tcp://192.168.1.0:2376"
+# export DOCKER_TLS=true
+# export DOCKER_TLS_VERIFY=true
+
+Create client key using same CA and drop keys along with CA key in ~/.docker (users .docker folder)
+docker cli/client will now start communicating in an encrypted manner with the docker server and would need certifcate signed by the same CA.
 ```
