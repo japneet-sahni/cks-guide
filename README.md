@@ -965,3 +965,103 @@ handler: runsc/kata  # The name of the corresponding CRI configuration
 # To use this, add in pod spec
 runtimeClassName: gvisor/kata
 ```
+
+# 4. Supply Chain Security
+## 4.1 Minimize BAse Image footprint
+- The top most image is built *FROM scratch*
+- *Modular* : Do not try to combine different types of applications in one docker image. Keep them modularized.
+- *Persist State* : Do not persist state inside a container.
+- *Sim/Minimal Images* : Find an official image if it exists.
+- *Multi-stage builds*
+
+## 4.2 Whitelist Allowed Registres
+- 3 ways of whitelisting
+  - Using validating webhook configuration by deploying an admission controller server
+  - Using OPA policy
+  - Using ImagePolicyWebhook admission controller (discussed below)
+    - Good things about ImagePolicyWebhook: The API server can be instructed to reject the images if the webhook endpoint is not reachable.
+    - Bad things about ImagePolicyWebhook: More configuration files are expected on the API server node(s) compared to ValidatingWebhookConfiguration.
+
+```sh
+# Images with latest tag will be currently accepted.
+# Deploy Image Policy Webhook server given below (create deployment & node port service)
+https://github.com/kainlite/kube-image-bouncer/blob/master/kubernetes/image-bouncer-webhook.yaml
+service/image-bouncer-webhook created
+deployment.apps/image-bouncer-webhook created
+
+# Create Admission kube config file
+apiVersion: v1
+kind: Config
+clusters:
+- cluster:
+    certificate-authority: /etc/kubernetes/pki/server.crt
+    server: https://image-bouncer-webhook:30080/image_policy
+  name: bouncer_webhook
+contexts:
+- context:
+    cluster: bouncer_webhook
+    user: api-server
+  name: bouncer_validator
+current-context: bouncer_validator
+preferences: {}
+users:
+- name: api-server
+  user:
+    client-certificate: /etc/kubernetes/pki/apiserver.crt
+    client-key:  /etc/kubernetes/pki/apiserver.key
+
+# Create Admission configuration
+apiVersion: apiserver.config.k8s.io/v1
+kind: AdmissionConfiguration
+plugins:
+- name: ImagePolicyWebhook
+  configuration:
+    imagePolicy:
+      kubeConfigFile: /etc/kubernetes/pki/admission_kube_config.yaml
+      allowTTL: 50
+      denyTTL: 50
+      retryBackoff: 500
+      defaultAllow: false # By default, if connection to webhook server is unreachable, the request will be denied.
+
+# Update API server with these flags
+--admission-control-config-file=/etc/kubernetes/pki/admission_configuration.yaml
+--enable-admission-plugins=ImagePolicyWebhook
+
+# Now all containers with latest tag will not be deployed.
+```
+
+## 4.3 Static analysis of workloads using KubeSec
+```sh
+# Installing kubesec
+wget https://github.com/controlplaneio/kubesec/releases/download/v2.11.0/kubesec_linux_amd64.tar.gz
+tar -xvf  kubesec_linux_amd64.tar.gz
+mv kubesec /usr/bin/
+
+# Scanning using kubesec
+kubesec scan node.yaml
+```
+
+## 4.4 Scanning images using Trivy
+```sh
+# Add the trivy-repo
+apt-get  update
+apt-get install wget apt-transport-https gnupg lsb-release
+wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+echo deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main | sudo tee -a /etc/apt/sources.list.d/trivy.list
+
+# Update Repo and Install trivy
+apt-get update
+apt-get install trivy
+
+# Scan Image
+trivy image nginx:1.19
+
+# Scan only high severity
+trivy image --severity=HIGH nginx:1.19
+
+# Scan tar file
+trivy image --input alpine.tar --format json --output /root/alpine.json
+```
+
+# 5. Monitoring, Logging & Runtime Security
+## 5.1 
