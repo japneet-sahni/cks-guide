@@ -1,6 +1,34 @@
 # cks-guide
 Guide to study for Certified Kubernetes Specialist
 
+# K8S Cluster Setup
+```sh
+# cks-master
+sudo -i
+bash <(curl -s https://raw.githubusercontent.com/killer-sh/cks-course-environment/master/cluster-setup/latest/install_master.sh)
+# cks-worker
+sudo -i
+bash <(curl -s https://raw.githubusercontent.com/killer-sh/cks-course-environment/master/cluster-setup/latest/install_worker.sh)
+# run the printed kubeadm-join-command from the master on the worker
+# kubectl get nodes -o wide
+NAME            STATUS   ROLES                  AGE     VERSION 
+k8s-master-01   Ready    control-plane,master   2m38s   v1.21.0
+k8s-worker-01   Ready    <none>                 40s     v1.21.0
+
+# k get pods -A
+NAMESPACE     NAME                                    READY   STATUS    RESTARTS   AGE
+kube-system   coredns-558bd4d5db-6gczq                1/1     Running   0          66m
+kube-system   coredns-558bd4d5db-v2bhz                1/1     Running   0          66m
+kube-system   etcd-k8s-master-01                      1/1     Running   0          67m
+kube-system   kube-apiserver-k8s-master-01            1/1     Running   0          67m
+kube-system   kube-controller-manager-k8s-master-01   1/1     Running   0          67m
+kube-system   kube-proxy-8fwfb                        1/1     Running   0          66m
+kube-system   kube-proxy-rk7kg                        1/1     Running   0          65m
+kube-system   kube-scheduler-k8s-master-01            1/1     Running   0          67m
+kube-system   weave-net-dtjk5                         2/2     Running   1          65m
+kube-system   weave-net-shfxd                         2/2     Running   1          66m
+```
+
 ## 4 C's of cloud native security
 - Cloud
 - Cluster
@@ -12,7 +40,7 @@ Guide to study for Certified Kubernetes Specialist
 - CIS : Center of Internet Security
 
 ```sh
-# sh ./Assessor-CLI.sh -rd "/var/www/html/" -rp "index" -i -nts
+# sh ./Assessor-CLI.sh -rd "/var/www/html/" -rp "index" -i -nts (nts means no timestamp in the file name)
 --------------------------------------------------------------------------------------
          Welcome to CIS-CAT Pro Assessor; built on 08/09/2021 02:04 AM
 --------------------------------------------------------------------------------------
@@ -99,7 +127,7 @@ Total Assessment Time: 4 minutes
 
  ***** Writing Assessment Results ***** 
  - Reports saving to /var/www/html
- -- index.html-20210906T163948Z.html
+ -- index.html
 Assessment Complete for Checklist: CIS Ubuntu Linux 18.04 LTS Benchmark
 -----------------------------------------------------------
 Disconnecting Session.
@@ -144,18 +172,22 @@ Make sure that root is the user and group owner of the file and that only the ow
 2) Static Token file
 - Put token,user,uid,group_name in a token.csv
 - In API server yml file, put --token-auth-file=token.csv
-- curl -kv --header "Authorization: Bearer <token> " https://master-node-ip:6443/api/v1/pods
+- curl -kv --header "Authorization: Bearer token_value " https://master-node-ip:6443/api/v1/pods
 
 3) Certificates
 ```sh
+# Generate CA key
+openssl genrsa -out ca.key 2048
+# Generate CA CSR
+openssl req -new -key ca.key -subj "/CN=kubernetes-ca" -out ca.csr
+# Generate CA CRT
+openssl x509 -req -in ca.csr -out ca.crt
 # Generate private key for admin user
 openssl genrsa -out admin.key 2048
-
 # Generate CSR for admin user. Note the OU.
 openssl req -new -key admin.key -subj "/CN=admin/O=system:masters" -out admin.csr
-
 # Sign certificate for admin user using CA servers private key
-openssl x509 -req -in admin.csr -CA ca.crt -CAkey ca.key -CAcreateserial  -out admin.crt -days 1000
+openssl x509 -req -in admin.csr -out admin.crt -CA ca.crt -CAkey ca.key -CAcreateserial -days 1000
 
 # Curl using certificates now
 curl -kv https://master-node-ip:6443/api/v1/pods --key admin.crt --cert admin.crt --cacert ca.crt
@@ -199,7 +231,9 @@ openssl x509 -in admin.crt -text -noout
     - CSR-APPROVING
     - CSR-SIGNING
 ```sh
-# To be used by a new admin user,
+# openssl genrsa 2048 -out japneet.key
+# openssl req -new -key japneet.key -subj "/CN=japneet" -out japneet.csr
+# Create CertificateSigningRequest
 
 cat <<EOF | kubectl apply -f -
 apiVersion: certificates.k8s.io/v1
@@ -207,7 +241,7 @@ kind: CertificateSigningRequest
 metadata:
   name: japneet
 spec:
-  request: $(cat japneet.csr | base64 | tr -d '\n')
+  request: $(cat japneet.csr | base64 -w 0)
   signerName: kubernetes.io/kubelet-serving
   usages:
   - digital signature
@@ -217,8 +251,13 @@ EOF
 
 # kubectl get csr
 # kubectl certificate approve/deny japneet
-# kubectl get csr japneet -o jsonpath='{.status.certificate}' | base64 --decode
+# kubectl get csr japneet -o jsonpath='{.status.certificate}' | base64 --decode > japneet.crt
 # Send this to japneet (new admin user)
+# k config set-credentials japneet --client-key=japneet.key --client-certificate=japneet.crt --embed-certs
+# k config set-context japneet --user=japneet --cluster=kubernetes
+# k config use-context japneet
+# k auth can-i delete deployments -A
+yes or no depending on RBAC permissions.
 ```
 
 ## 1.4 Authorization
@@ -285,7 +324,7 @@ EOF
 - Port 10255 : Serves API that allows unauthenticated read-only access. Eg : curl -sk http://localhost:10255/metrics
 
 #### Disable anonymous authentication in 2 ways
-  - By deafult, allows anonymous access on port 10250
+  - By default, allows anonymous access on port 10250
   - Add --anonymous-auth=false in kubelet.service
   - Add authentication.anonymous.enabled: false in kubelet-config.yaml
 ```sh
@@ -305,7 +344,7 @@ Unauthorized
 - Default authorization mode is alwaysAllow
 - Add authorization.mode: Webhook in kubelet-config.yaml (goes to API server to see if the user is able to access kubelet)
 ```sh
-# IF authentication is enabled and authorization mode is set to Webhook (W caps)
+# If authentication is enabled and authorization mode is set to Webhook (W caps)
 # curl -sk https://localhost:10250/pods/
 Forbidden (user=system:anonymous, verb=get, resource=nodes, subresource=proxy)
 ```
@@ -352,31 +391,45 @@ kubectl apply -f https://raw.githubusercontent.com/kubernetes/dashboard/v2.3.1/a
 kubectl proxy &
 http://localhost:8001/api/v1/namespaces/kubernetes-dashboard/services/https:kubernetes-dashboard:/proxy/
 
-# Create SA and give "view" cluster role
-cat <<EOF | kubectl apply -f -
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: readonly-user
-  namespace: kubernetes-dashboard
-EOF
+# or make following changes to deplo and svc
+# deploy
+- Remove --auto-generate-certificates
+- Add --insecure-port=9090
+- Change liveliness probe and container port to 9090
+# svc
+- Make it NodePort
+- Change target and port to 9090
+
+# Final changes
+containers:
+      - args:
+        - --insecure-port=9090
+        - --authentication-mode=token
+        # enable-insecure-login does not say that you will be allowed to log in over HTTP. It only says that when Dashboard is not served over HTTPS the login screen will still be enabled. Sign-in will always be restricted to HTTP(S) + localhost or HTTPS and external domains as described in the error message that you see on the login screen.
+        - --enable-insecure-login=true
+        - --namespace=kubernetes-dashboard
+        image: kubernetesui/dashboard:v2.3.1
+
+# The Kubernetes dashboard will be available on NodePort. But you will still get permission issues with service account kubernetes-dashboard. So bind below clusterrole to the service account. If you create a rolebinding instead of clusterolebinding, then you kubernetes-dashboard SA will get access to only kubernetes-dashboard namespace.
+
+# Give "view" cluster role permissions to already existing kubernetes-dashboard service account
 
 cat <<EOF | kubectl apply -f -
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: readonly-user-binding
+  name: kubernetes-dashboard-sa-binding
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: view
 subjects:
 - kind: ServiceAccount
-  name: readonly-user
+  name: kubernetes-dashboard
   namespace: kubernetes-dashboard
 EOF
 
-kubectl -n kubernetes-dashboard get secret $(kubectl -n kubernetes-dashboard get sa/readonly-user -o jsonpath="{.secrets[0].name}") -o go-template="{{.data.token | base64decode}}"
+kubectl -n kubernetes-dashboard get secret $(kubectl -n kubernetes-dashboard get sa/kubernetes-dashboard -o jsonpath="{.secrets[0].name}") -o go-template="{{.data.token | base64decode}}"
 Paste this token on Dashboard
 ```
 
@@ -388,6 +441,18 @@ https://github.com/kubernetes/kubernetes/releases/tag/v1.20.0
 
 # sha512sum kubernetes.tar.gz  
 ebfe49552bbda02807034488967b3b62bf9e3e507d56245e298c4c19090387136572c1fca789e772a5e8a19535531d01dcedb61980e42ca7b0461d3864df2c14  kubernetes.tar.gz
+
+# Comparing specific components of K8S 
+kubeadm upgrade plan (get the version)
+cd /tmp
+wget https://dl.k8s.io/v1.21.0/kubernetes-server-linux-amd64.tar.gz
+tar xzf kubernetes-server-linux-amd64.tar.gz
+sha512sum kubernetes/server/bin/kube-apiserver > compare
+docker ps | grep apiserver
+docker cp 1bce2ce51d4f:/ apiserver-fs
+sha512sum apiserver-fs/usr/local/bin/kube-apiserver >> compare
+vi compare (Removing file names)
+cat compare | uniq
 ```
 
 ## 1.10 Upgrade process
@@ -455,14 +520,23 @@ spec:
     ports:
     - protocol: TCP
       port: 5978
+
+# If you apply default deny policy, make sure you add egress rules for DNS port 53 with tcp/udp protocols. This would be required to work with K8S services.
+# For using namespaceSelector, make sure you add labels to the namespace.
 ```
 
 ## 1.12 Ingress
-- Ingress Controllers have extra intelligence built into them to monitor the cluster for ingress resources and configure the underlying nginx configuration when something is chnaged. For doing this, it needs a SA with extra privileges.
-- Ingress controller is deployed as a simple deployment. All the configuration is stored in a config map.
-- Example : GCE, Nginx ( supported by K8S ), traefik, istio, contour.
 
+- Ingress Controllers have extra intelligence built into them to monitor the cluster (using ValidatingWebhookConfiguration) for ingress resources and configure the underlying nginx configuration when something is changed. For doing this, it needs a SA with extra privileges.
+- Ingress controller is deployed as a simple deployment. All the configuration is stored in a config map.
+- Example : GCE, Nginx ( both of them supported by K8S ), traefik, istio, contour.
+
+### 1.12.1 Configuring Ingress
 ```sh
+# Create Ingress Controller
+kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.0.0/deploy/static/provider/baremetal/deploy.yaml
+
+# kubectl describe validatingwebhookconfiguration ingress-nginx-admission
 # kubectl create ingress ingress-wear-watch \
 --rule="foo.com/wear=wear-service:8080" \
 --rule="foo.com/stream=video-service:8080"
@@ -496,6 +570,44 @@ spec:
         path: /stream
         pathType: Prefix
 ```
+### 1.12.2 Securing Ingress
+- Ingress service is exposed both on 80 and 443 ports
+- To use https, we need to create a TLS secret and add TLS section in Ingress spec
+- Make sure to now add host in the rules section because the tls certs will be bounded only to this host.
+
+```sh
+# k get svc -n ingress-nginx
+NAME                                 TYPE        CLUSTER-IP       EXTERNAL-IP   PORT(S)                      AGE
+ingress-nginx-controller             NodePort    10.108.191.58    <none>        80:32436/TCP,443:30852/TCP   23m
+
+# kubectl create secret tls ingress-tls-secret \
+  --cert=path/to/cert/file \
+  --key=path/to/key/file
+
+# Edit Ingress configuration to 
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+  name: tls-example-ingress
+spec:
+  tls:
+  - hosts:
+      - https-example.foo.com
+    secretName: ingress-tls-secret 
+  rules:
+  - host: https-example.foo.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: service1
+            port:
+              number: 80
+```
 
 ## 1.13 Securing the docker daemon
 - If somebody gains access to docker daemon, he/she can delete/read/update/run the existing containers, delete volumes, gain access to host using priveliged container.
@@ -527,6 +639,62 @@ On docker client now, set below envt variables
 Create client key using same CA and drop keys along with CA key in ~/.docker (users .docker folder)
 docker cli/client will now start communicating in an encrypted manner with the docker server and would need certifcate signed by the same CA.
 ```
+
+## 1.14 Securing Node Metadata service
+- Any pod can access metadat service of the VM using curl command. 
+- Restrict access to metadata service using Network policies. Metadata service for GCP runs on 169.254.169.254
+- Deny access to this IP for all pods. Then allow access to this IP for only seleted pods
+
+```sh
+# all pods in namespace cannot access metadata endpoint
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: cloud-metadata-deny
+  namespace: default
+spec:
+  podSelector: {}
+  policyTypes:
+  - Egress
+  egress:
+  - to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+        except:
+        - 169.254.169.254/32
+
+# kubectl exec -it nginx -- sh
+# curl -H 'Metadata-Flavor: Google' 'http://metadata.google.internal/computeMetadata/v1/instance/name'
+........
+
+# only pods with label are allowed to access metadata endpoint
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: cloud-metadata-allow
+  namespace: default
+spec:
+  podSelector:
+    matchLabels:
+      role: metadata-accessor
+  policyTypes:
+  - Egress
+  egress:
+  - to:
+    - ipBlock:
+        cidr: 169.254.169.254/32
+
+# k label pod/nginx role=metadata-accessor
+pod/nginx labeled
+
+# kubectl exec -it nginx -- sh
+# curl -H 'Metadata-Flavor: Google' 'http://metadata.google.internal/computeMetadata/v1/instance/name'
+k8s-worker-01
+```
+
+## 1.15 Kube-Apiserver Security
+- --anonymous-auth=false (This would bring API server to unstable state as liveliness probes will fail)
+- --insecure-port=8080 (should be 0-disabled). This will bypass authentication and authorization on HTTP mode. This has now been deprecated as part of 1.20. (curl http://localhost:8080/)
 
 # 2. Cluster Hardening
 ## 2.1 Limit Node Access
@@ -740,7 +908,7 @@ container.apparmor.security.beta.kubernetes.io/<container_name>: <profile_ref>
 # 3. Minimizing Microservices Vulnerabilities
 ## 3.1 Linux Capabilities and Security Contexts
 - Even after disabling seccomp using --security-opt seccomp=unconfined in a docker container, you will notice that still you won't be able to run some commands like changing systime. This is because of another security gate which is called linux capabilities
-- Before 2.2, we only had the binary system of privileged (uid=0) and non-privileged processes; either your process could do everything or it was restricted to the subset of a standard user. Certain executables like ping, which needed to be run by standard users but also make privileged kernel calls
+- Before 2.2, we only had the binary system of privileged (uid=0) and non-privileged processes; either your process could do everything or it was restricted to the subset of a standard user. Certain executables like ping, which needed to be run by standard users, also make privileged kernel calls
 - After kernel version 2.2, with introduction of capabilities, all the possible privileged kernel calls were split up into groups of related functionality, then we can assign processes only to the subset they need.
 
 ```sh
@@ -790,6 +958,7 @@ spec:
   - NamespaceAutoProvision (creates NS if non-existent) - deprecated
   - NaespaceLifeCycle - will make sure that requests to a non-existent namespace is rejected and that the default namespaces such as default, kube-system and kube-public cannot be deleted.
   - DefaultStorageClass
+  - NodeRestriction - This admission controller limits the Node and Pod objects a kubelet can modify. Such kubelets will only be allowed to modify their own Node API object, and only modify Pod API objects that are bound to their node. Prevents kubelets from adding/removing/updating labels with a node-restriction.kubernetes.io/ prefix. This label prefix is reserved for administrators to label their Node objects for workload isolation purposes
 
 - 2 types of admission controllers:
   - Validating (validates request) Eg : NamespaceExists
@@ -937,6 +1106,16 @@ deny[msg] {
 kubectl create configmap untrusted-registry --from-file=untrusted-registry.rego -n opa
 ```
 ## 3.5 Container Sandboxing
+- namespaces : Restrict what processes can see like other processes, users, file-systems
+- cgroups: Restrict the resource usage of processes like RAM, disk, CPU.
+```sh
+# c1 and c2 will run in different process namespaces
+docker run --name c1 -d ubuntu sh -c 'sleep 1d'
+docker run --name c2 -d ubuntu sh -c 'sleep 2d'
+
+# c3 will run in same process namespace as c1. You can see both processes in c1 and c3.
+docker run --name c3 --pid=container:c1 -d ubuntu sh -c 'sleep 3d'
+```
 ### 3.5.1 gVisor
 - https://gvisor.dev/docs/
 - In docker, every container shares the same host OS kernel unlike VM's which have their own kernels.
@@ -944,7 +1123,7 @@ kubectl create configmap untrusted-registry --from-file=untrusted-registry.rego 
 - gvisor is an application kernel that provides an additional layer of isolation between running applications and the host operating system.
 - It limits the host kernel surface accessible to the application while still giving the application access to all the features it expects (makes limited syscalls).
 - However, this comes at the price of reduced application compatibility and higher per-system call overhead.
-- Uses runsc as container runtime. (docker uses runC as container runtime)
+- gvisor uses runsc as container runtime. (docker uses runC as container runtime)
 
 ### 3.5.2 Kata Containers
 - Creates a light weight VM for each container, thus every container gets it's own guest VM kernel, hence limiting sys calls to host OS kernel.
@@ -989,6 +1168,8 @@ service/image-bouncer-webhook created
 deployment.apps/image-bouncer-webhook created
 
 # Create Admission kube config file
+vi /etc/kubernetes/pki/admission_kube_config.yaml
+
 apiVersion: v1
 kind: Config
 clusters:
@@ -1010,6 +1191,8 @@ users:
     client-key:  /etc/kubernetes/pki/apiserver.key
 
 # Create Admission configuration
+vi /etc/kubernetes/pki/admission_configuration.yaml
+
 apiVersion: apiserver.config.k8s.io/v1
 kind: AdmissionConfiguration
 plugins:
