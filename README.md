@@ -696,6 +696,68 @@ k8s-worker-01
 - --anonymous-auth=false (This would bring API server to unstable state as liveliness probes will fail)
 - --insecure-port=8080 (should be 0-disabled). This will bypass authentication and authorization on HTTP mode. This has now been deprecated as part of 1.20. (curl http://localhost:8080/)
 
+## 1.16 ETCD Security
+- By default there is no encryption of secrets in ETCD
+
+```sh
+# k create secret generic mysecret --from-literal=user=admin
+secret/mysecret created
+# ETCDCTL_API=3 etcdctl endpoint health
+127.0.0.1:2379 is unhealthy: failed to connect: context deadline exceeded
+Error:  unhealthy cluster
+# cat /etc/kubernetes/manifests/kube-apiserver.yaml | grep -i etcd
+    - --etcd-cafile=/etc/kubernetes/pki/etcd/ca.crt
+    - --etcd-certfile=/etc/kubernetes/pki/apiserver-etcd-client.crt
+    - --etcd-keyfile=/etc/kubernetes/pki/apiserver-etcd-client.key
+    - --etcd-servers=https://127.0.0.1:2379
+# ETCDCTL_API=3 etcdctl --cert /etc/kubernetes/pki/apiserver-etcd-client.crt --key /etc/kubernetes/pki/apiserver-etcd-client.key --cacert /etc/kubernetes/pki/etcd/ca.crt endpoint health
+127.0.0.1:2379 is healthy: successfully committed proposal: took = 1.756006ms
+# ETCDCTL_API=3 etcdctl --cert /etc/kubernetes/pki/apiserver-etcd-client.crt --key /etc/kubernetes/pki/apiserver-etcd-client.key --cacert /etc/kubernetes/pki/etcd/ca.crt get /registry/secrets/default/mysecret
+
+mysecret ?default"*$c7cb9d6f-3fa7-4b89-84ec-4639699aa2e92񵞊z�_
+kubectl-createUpdate  ?v1񵞊FieldsV1:-
++{"f:data":{".":{},"f:user":{}},"f:type":{}}
+user  admin?Opaque ?"
+```
+
+## 1.16.1 Encrypting Secret Data at Rest (ETCD)
+- The kube-apiserver process accepts an argument --encryption-provider-config that controls how API data is encrypted in etcd.
+- The providers array is an ordered list of the possible encryption providers.
+- The first provider in the list is used to encrypt resources going into storage. When reading resources from storage each provider that matches the stored data attempts to decrypt the data in order.
+
+- Steps
+
+```sh
+# 1) Create base64 encoded secret
+head -c 32 /dev/urandom | base64
+
+# 2) Create EncryptionConfiguration file and copy the encoded secret. Will place the file in /etc/kubernetes/pki/etcd folder as this is already mounted on api-server
+apiVersion: apiserver.config.k8s.io/v1
+kind: EncryptionConfiguration
+resources:
+  - resources:
+    - secrets
+    providers:
+    - aescbc:
+        keys:
+        - name: key1
+          secret: <base 64 encoded secret>
+    # Identity provider : Resources written as-is without encryption. When set as the first provider, the resource will be decrypted as new values are written.
+    - identity: {}
+
+# 3) Add --encryption-provider-config=/etc/kubernetes/pki/etcd/ec.yml
+
+# 4) After this step, any new secret created would be encrypted at rest.
+# kubectl create secret generic secure-secret --from-literal=user=admin
+secret/secure-secret created
+# ETCDCTL_API=3 etcdctl --cert /etc/kubernetes/pki/apiserver-etcd-client.crt --key /etc/kubernetes/pki/apiserver-etcd-client.key --cacert /etc/kubernetes/pki/etcd/ca.crt get /registry/secrets/default/secure-secret
+k8s:enc:aescbc:v1:key1:��zFRR���2(�w�&u?�zK����    Y@�z����MV��
+
+# 5) Replace all secrets using this new encryption
+kubectl get secrets --all-namespaces -o json | kubectl replace -f -
+# 6) Remove identity provider from encryption configuration.
+```
+
 # 2. Cluster Hardening
 ## 2.1 Limit Node Access
 ```sh
@@ -1062,13 +1124,16 @@ subjects:
 ```
 
 ## 3.4 Open Policy Agent (OPA)
+
 ### 3.4.1 OPA in general
+
 - https://www.youtube.com/watch?v=4mBJSIhs2xQ
 - https://www.openpolicyagent.org/docs/latest/
 - OPA provides a high-level declarative language that lets you specify policy as code and simple APIs to offload policy decision-making from your software. You can use OPA to enforce policies in microservices, Kubernetes, CI/CD pipelines, API gateways, and more.
 - OPA decouples policy decision-making from policy enforcement. When your software needs to make policy decisions it queries OPA and supplies structured data (e.g., JSON) as input. 
 - OPA policies are expressed in a high-level declarative language called Rego. Rego (pronounced “ray-go”) is purpose-built for expressing policies over complex hierarchical data structures.
 - By default runs on 8181 port as http server.
+- The REGO Playground - https://play.openpolicyagent.org/ 
 
 ```sh
 # Test OPA policy
@@ -1079,6 +1144,7 @@ curl -X PUT --data-binary @sample.rego http://localhost:8181/v1/policies/samplep
 ```
 
 ### 3.4.2 OPA in K8S
+
 - Instead of creating your own validating admission controller, you can assign this to OPA.
 - Deploy OPA as K8S deployment and service in a separate namespace.
 - Just set url(if external)/service (if in K8S) of OPA in clientconfig section of ValidatingWebhookConfiguration
@@ -1087,7 +1153,8 @@ curl -X PUT --data-binary @sample.rego http://localhost:8181/v1/policies/samplep
 - In this, we leverage *kube-mgmt* service which runs as a side car with OPA which
   - Replicates/Caches all details about all resources of existing cluster in OPA. This info can be used using *import data.kubernetes.<resource>
   - Helps in loading policies in OPA through a config map with an annotation as *openpolicyagent.org/policy=rego*
-  - 
+
+- *So this is Gatekeeper v1.0 - Uses OPA as the admission controller with the kube-mgmt sidecar enforcing configmap-based policies. It provides validating and mutating admission control.*
 
 ```sh
 # Example of REGO policy for pods
@@ -1104,6 +1171,118 @@ deny[msg] {
 
 # By default kube-mgmt will try to load policies out of configmaps in the opa namespace OR configmaps in other namespaces labelled openpolicyagent.org/policy=rego.
 kubectl create configmap untrusted-registry --from-file=untrusted-registry.rego -n opa
+```
+
+### 3.4.3 OPA gatekeeper
+
+- During the validation process, Gatekeeper acts as a bridge between the API server and OPA. The API server will enforce all policies executed by OPA.
+- When you install OPA gatekeeper, you will get below CRD's
+```sh
+# k get crd
+NAME                                                 CREATED AT
+configs.config.gatekeeper.sh                         2021-09-20T11:40:26Z
+constraintpodstatuses.status.gatekeeper.sh           2021-09-20T11:40:26Z
+constrainttemplatepodstatuses.status.gatekeeper.sh   2021-09-20T11:40:26Z
+constrainttemplates.templates.gatekeeper.sh          2021-09-20T11:40:26Z
+```
+- constrainttemplates CRD allows people to declare new Constraints (new CRD)
+- A Constraint is a declaration that its author wants a system to meet a given set of requirements. Each Constraint is written with Rego. All Constraints are evaluated as a logical AND. If one Constraint is not satisfied, then the whole request is rejected.
+
+```sh
+# Constraint template CRD that requires certain labels to be present on an arbitrary object.
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  name: k8srequiredlabels
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sRequiredLabels
+      validation:
+        # Schema for the `parameters` field
+        openAPIV3Schema:
+          properties:
+            labels:
+              type: array
+              items: string
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8srequiredlabels
+        violation[{"msg": msg, "details": {"missing_labels": missing}}] {
+          provided := {label | input.review.object.metadata.labels[label]}
+          required := {label | label := input.parameters.labels[_]}
+          missing := required - provided
+          count(missing) > 0
+          msg := sprintf("you must provide labels: %v", [missing])
+        }  
+  
+# k get crd
+NAME                                                 CREATED AT
+configs.config.gatekeeper.sh                         2021-09-20T11:40:26Z
+constraintpodstatuses.status.gatekeeper.sh           2021-09-20T11:40:26Z
+constrainttemplatepodstatuses.status.gatekeeper.sh   2021-09-20T11:40:26Z
+constrainttemplates.templates.gatekeeper.sh          2021-09-20T11:40:26Z
+k8srequiredlabels.constraints.gatekeeper.sh          2021-09-20T11:50:52Z
+
+# A Constraint CRD that requires the label hr to be present on all namespaces.
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sRequiredLabels
+metadata:
+  name: ns-must-have-label-hr
+spec:
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Namespace"]
+  parameters:
+    labels: ["hr"]
+
+# kubectl create ns blue
+Error from server ([ns-must-have-label-hr] you must provide labels: {"hr"}): admission webhook "validation.gatekeeper.sh" denied the request: [ns-must-have-label-hr] you must provide labels: {"hr"}
+
+# kubectl describe k8srequiredlabels ns-must-have-label-hr
+# Gatekeeper stores audit results as violations listed in the status field of the relevant Constraint.
+Total Violations:  5
+  Violations:
+    Enforcement Action:  deny
+    Kind:                Namespace
+    Message:             you must provide labels: {"hr"}
+    Name:                default
+    Enforcement Action:  deny
+    Kind:                Namespace
+    Message:             you must provide labels: {"hr"}
+    Name:                gatekeeper-system
+    Enforcement Action:  deny
+    Kind:                Namespace
+    Message:             you must provide labels: {"hr"}
+    Name:                kube-node-lease
+    Enforcement Action:  deny
+    Kind:                Namespace
+    Message:             you must provide labels: {"hr"}
+    Name:                kube-public
+    Enforcement Action:  deny
+    Kind:                Namespace
+    Message:             you must provide labels: {"hr"}
+    Name:                kube-system
+
+# Alternative of kube-mgmt service in gatekeeper now is to create a sync config resource with the resources to be replicated into OPA. For example, the below configuration replicates all namespace and pod resources to OPA.
+
+apiVersion: config.gatekeeper.sh/v1alpha1
+kind: Config
+metadata:
+  name: config
+  namespace: "gatekeeper-system"
+spec:
+  sync:
+    syncOnly:
+      - group: ""
+        version: "v1"
+        kind: "Namespace"
+      - group: ""
+        version: "v1"
+        kind: "Pod"
 ```
 ## 3.5 Container Sandboxing
 - namespaces : Restrict what processes can see like other processes, users, file-systems
@@ -1124,6 +1303,12 @@ docker run --name c3 --pid=container:c1 -d ubuntu sh -c 'sleep 3d'
 - It limits the host kernel surface accessible to the application while still giving the application access to all the features it expects (makes limited syscalls).
 - However, this comes at the price of reduced application compatibility and higher per-system call overhead.
 - gvisor uses runsc as container runtime. (docker uses runC as container runtime)
+
+```sh
+# Installing gvisor on worker node. This will install containerd which supports both runc and runsc container runtime interfaces
+bash <(curl -s https://raw.githubusercontent.com/killer-sh/cks-course-environment/master/course-content/microservice-vulnerabilities/container-runtimes/gvisor/install_gvisor.sh)
+
+```
 
 ### 3.5.2 Kata Containers
 - Creates a light weight VM for each container, thus every container gets it's own guest VM kernel, hence limiting sys calls to host OS kernel.
@@ -1323,7 +1508,7 @@ kill -1 $(cat /var/run/falco.pid)
 
 ## 5.2 Ensure Immutability of Containers at Runtime
 - Set readOnlyRootFileSystem: true
-- Set priviledged: false
+- Set priviledged: false (Priviledged means that container user 0-root is directly mapped to host user 0-root)
 - set runAsUser: RunAsNonRoot
 - Use volumes/mounts where you think the data will be written (log/caches) so that nobody can edit/add/delete file from other locations
 
