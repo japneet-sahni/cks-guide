@@ -864,7 +864,7 @@ CONFIG_SECCOMP=y
 # grep process/pid running in docker container (by default main process runs with pid=1)
 # grep Seccomp /proc/<pid>/status
 Seccomp: 2
-# By default, docker runs with filtered eccomp mode (above output)
+# By default, docker runs with filtered seccomp mode (above output)
 
 # There are 3 Seccomp modes:
 0: Disabled, 1: Strict, 2: Filtered
@@ -943,20 +943,15 @@ Y
 
 # Installing apparmour
 apt install -y apparmor-utils
-
 # Profiles path
 ls -la /etc/apparmor.d/
-
 # To check status of apparmor
 apparmor_status/aa-status
-
 # To a add a new apparmor profile
 # The actual profile name is mentioned in the file and should preferrably match the fie name.
 apparmor_parser /etc/apparmor.d/profile.name
-
 # To reload/replace a profile
 apparmor_parser -r /etc/apparmor.d/usr.sbin.nginx
-
 # Annotation to be added to the pod for enabling apparmor profile.
 container.apparmor.security.beta.kubernetes.io/<container_name>: <profile_ref>
 
@@ -966,7 +961,121 @@ container.apparmor.security.beta.kubernetes.io/<container_name>: <profile_ref>
   - localhost/<profile_name> to apply the profile loaded on the host with the name <profile_name>
   - unconfined to indicate that no profiles will be loaded
 ```
+```sh
+# Apparmor for curl
+# aa-genprof curl
+Writing updated profile for /usr/bin/curl.
+Setting /usr/bin/curl to complain mode.
 
+Before you begin, you may wish to check if a
+profile already exists for the application you
+wish to confine. See the following wiki page for
+more information:
+https://gitlab.com/apparmor/apparmor/wikis/Profiles
+
+Profiling: /usr/bin/curl
+
+Please start the application to be profiled in
+another window and exercise its functionality now.
+
+Once completed, select the "Scan" option below in 
+order to scan the system logs for AppArmor events. 
+
+For each AppArmor event, you will be given the 
+opportunity to choose whether the access should be 
+allowed or denied.
+
+[(S)can system log for AppArmor events] / (F)inish
+Setting /usr/bin/curl to enforce mode.
+
+Reloaded AppArmor profiles in enforce mode.
+
+Please consider contributing your new profile!
+See the following wiki page for more information:
+https://gitlab.com/apparmor/apparmor/wikis/Profiles
+
+Finished generating profile for /usr/bin/curl.
+
+# cat usr.bin.curl
+#include <tunables/global>
+
+/usr/bin/curl {
+  #include <abstractions/base>
+
+  /usr/bin/curl mr,
+
+}
+
+# Apparmor profile will now start blocking the sys calls for curl
+# curl -v google.com
+* Could not resolve host: google.com
+* Closing connection 0
+curl: (6) Could not resolve host: google.com
+
+# aa-logprof
+Reading log entries from /var/log/syslog.
+Updating AppArmor profiles in /etc/apparmor.d.
+Enforce-mode changes:
+
+Profile:  /usr/bin/curl
+Path:     /etc/ssl/openssl.cnf
+New Mode: owner r
+Severity: 2
+
+ [1 - include <abstractions/openssl>]
+  2 - include <abstractions/ssl_keys> 
+  3 - owner /etc/ssl/openssl.cnf r, 
+(A)llow / [(D)eny] / (I)gnore / (G)lob / Glob with (E)xtension / (N)ew / Audi(t) / (O)wner permissions off / Abo(r)t / (F)inish
+Adding include <abstractions/openssl> to profile.
+
+Profile:  /usr/bin/curl
+Path:     /etc/host.conf
+New Mode: owner r
+Severity: unknown
+
+ [1 - include <abstractions/nameservice>]
+  2 - owner /etc/host.conf r, 
+(A)llow / [(D)eny] / (I)gnore / (G)lob / Glob with (E)xtension / (N)ew / Audi(t) / (O)wner permissions off / Abo(r)t / (F)inish
+Adding include <abstractions/nameservice> to profile.
+
+Profile:  /{,usr/}sbin/dhclient
+Path:     /proc/763/task/766/comm
+New Mode: owner rw
+Severity: 9
+
+ [1 - owner /proc/*/task/766/comm rw,]
+  2 - owner /proc/763/task/766/comm rw, 
+(A)llow / [(D)eny] / (I)gnore / (G)lob / Glob with (E)xtension / (N)ew / Audi(t) / (O)wner permissions off / Abo(r)t / (F)inish
+
+= Changed Local Profiles =
+
+The following local profiles were changed. Would you like to save them?
+
+ [1 - /usr/bin/curl]
+(S)ave Changes / Save Selec(t)ed Profile / [(V)iew Changes] / View Changes b/w (C)lean profiles / Abo(r)t
+Writing updated profile for /usr/bin/curl.
+
+# cat usr.bin.curl
+# Last Modified: Thu Sep 23 09:24:21 2021
+#include <tunables/global>
+
+/usr/bin/curl {
+  #include <abstractions/base>
+  #include <abstractions/nameservice>
+  #include <abstractions/openssl>
+
+  /usr/bin/curl mr,
+
+}
+
+# curl google.com
+<HTML><HEAD><meta http-equiv="content-type" content="text/html;charset=utf-8">
+<TITLE>301 Moved</TITLE></HEAD><BODY>
+<H1>301 Moved</H1>
+The document has moved
+<A HREF="http://www.google.com/">here</A>.
+</BODY></HTML>
+```
 # 3. Minimizing Microservices Vulnerabilities
 ## 3.1 Linux Capabilities and Security Contexts
 - Even after disabling seccomp using --security-opt seccomp=unconfined in a docker container, you will notice that still you won't be able to run some commands like changing systime. This is because of another security gate which is called linux capabilities
@@ -1342,7 +1451,7 @@ runtimeClassName: gvisor/kata
   - Using validating webhook configuration by deploying an admission controller server
   - Using OPA policy
   - Using ImagePolicyWebhook admission controller (discussed below)
-    - Good things about ImagePolicyWebhook: The API server can be instructed to reject the images if the webhook endpoint is not reachable.
+    - Good things about ImagePolicyWebhook: The API server can be instructed to reject the images if the webhook endpoint is not reachable. (defaultAllow: false in AdmissionConfiguration object)
     - Bad things about ImagePolicyWebhook: More configuration files are expected on the API server node(s) compared to ValidatingWebhookConfiguration.
 
 ```sh
@@ -1397,7 +1506,8 @@ plugins:
 # Now all containers with latest tag will not be deployed.
 ```
 
-## 4.3 Static analysis of workloads using KubeSec
+## 4.3 Static analysis of workloads
+### 4.3.1 Using KubeSec
 ```sh
 # Installing kubesec
 wget https://github.com/controlplaneio/kubesec/releases/download/v2.11.0/kubesec_linux_amd64.tar.gz
@@ -1406,6 +1516,27 @@ mv kubesec /usr/bin/
 
 # Scanning using kubesec
 kubesec scan node.yaml
+```
+### 4.3.2 Using ConfTest (by OPA)
+- Can be run on both dockerfile and K8S yaml files
+```sh
+https://github.com/killer-sh/cks-course-environment/tree/master/course-content/supply-chain-security/static-analysis/conftest/kubernetes
+
+# from https://www.conftest.dev
+package main
+
+deny[msg] {
+  input.kind = "Deployment"
+  not input.spec.template.spec.securityContext.runAsNonRoot = true
+  msg = "Containers must not run as root"
+}
+
+deny[msg] {
+  input.kind = "Deployment"
+  not input.spec.selector.matchLabels.app
+  msg = "Containers must provide app label for pod selectors"
+}
+
 ```
 
 ## 4.4 Scanning images using Trivy
@@ -1419,6 +1550,9 @@ echo deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main |
 # Update Repo and Install trivy
 apt-get update
 apt-get install trivy
+
+# or using docker
+docker run --rm aquasec/trivy:0.19.2 image --severity=HIGH nginx:1.19
 
 # Scan Image
 trivy image nginx:1.19
