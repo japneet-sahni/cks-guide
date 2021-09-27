@@ -256,6 +256,7 @@ EOF
 # k config set-credentials japneet --client-key=japneet.key --client-certificate=japneet.crt --embed-certs
 # k config set-context japneet --user=japneet --cluster=kubernetes
 # k config use-context japneet
+# k config view --minify --raw (to view only current-context)
 # k auth can-i delete deployments -A
 yes or no depending on RBAC permissions.
 ```
@@ -848,6 +849,8 @@ ufw disable
 ```sh
 # strace is the utility to trace system calls between user space and kernel space (The applications/processes in user space talk to hardawre through linux kernel which is in kernel space)
 starce -c touch /tmp/dummy.txt
+# To get syscalls for a running process
+strace -p pid
 
 # Examples of system calls (https://man7.org/linux/man-pages/man2/syscalls.2.html)
 open(),read(),write(),close(),wait(),execve(),sleep(),clock_settime(),mkdir()
