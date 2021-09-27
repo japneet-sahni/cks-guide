@@ -1093,7 +1093,7 @@ getcap /usr/bin/touch
 getpcaps <pid>
 
 # Security context can be added both at pod and container level (container overrides pod)
-# Capabilities can only be added at pod level.
+# Capabilities can only be added at container level.
 apiVersion: v1
 kind: Pod
 metadata:
